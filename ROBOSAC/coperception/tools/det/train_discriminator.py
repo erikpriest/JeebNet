@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 # reuse the same dataset & config from robosac.py
 from coperception.datasets import V2XSimDet
@@ -56,7 +57,11 @@ def main():
     val_ds = V2XSimDet(
         dataset_roots=[f"{args.data}/agent{i}" for i in range(1,6)],
         config=config, config_global=config_global,
-        split="val", val=True
+        split="val", 
+        val=True,
+        bound=args.bound,
+        kd_flag=args.kd_flag,
+        no_cross_road=args.no_cross_road,
     )
     loader = DataLoader(val_ds, batch_size=args.batch, shuffle=True, num_workers=4)
 
@@ -68,10 +73,21 @@ def main():
     for epoch in range(args.epochs):
         disc.train()
         total_loss = 0
-        for batch in loader:
+        for cnt, sample in enumerate(tqdm(loader)):
             # batch is a tuple, we only need to reconstruct the `data` dict
-            (_bev, _bev_t, labels, reg_t, anchors, vis, gt_iou,
-             fnames, tgt_ids, num_agents, trans) = batch[0]
+            (bev_batch, bev_t_batch, labels_batch, reg_t_batch, anchors_batch, vis_batch, gt_iou_batch, fnames_batch, tgt_ids_batch, num_agents_batch, trans_batch) = zip(*sample)
+
+            _bev       = bev_batch[0]
+            _bev_t     = bev_t_batch[0]
+            labels     = labels_batch[0]
+            reg_t      = reg_t_batch[0]
+            anchors    = anchors_batch[0]
+            vis        = vis_batch[0]
+            gt_iou     = gt_iou_batch[0]
+            fnames     = fnames_batch[0]
+            tgt_ids    = tgt_ids_batch[0]
+            num_agents = num_agents_batch[0]
+            trans      = trans_batch[0]
 
             # prepare data dict exactly as in robosac.py
             data = {
