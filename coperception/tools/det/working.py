@@ -1,0 +1,1022 @@
+from coperception.datasets import V2XSimDet
+from coperception.configs import Config, ConfigGlobal
+from coperception.utils.CoDetModule import FaFModule
+from robosac import setup_seed
+
+from coperception.utils.detection_util import cal_local_mAP, visualization
+from coperception.utils.mean_ap import eval_map
+
+import random
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+import argparse
+import os
+from torch.utils.data import Subset, random_split
+
+
+from coperception.models.det import *
+from coperception.utils.loss import *
+from box_matching import associate_2_detections
+
+import sys
+import argparse
+
+from tqdm import tqdm
+
+import time
+
+# your parser
+parser = argparse.ArgumentParser()
+parser.add_argument(
+    "-d",
+    "--data",
+    default="{Your_location_to_V2X-Sim}/V2X-Sim/test",
+    type=str,
+    help="The path to the preprocessed sparse BEV training data",
+)
+parser.add_argument("--batch", default=1, type=int, help="The number of scene")
+parser.add_argument("--nepoch", default=100, type=int, help="Number of epochs")
+parser.add_argument("--nworker", default=4, type=int, help="Number of workers")
+parser.add_argument("--lr", default=0.001, type=float, help="Initial learning rate")
+parser.add_argument("--log", action="store_true", help="Whether to log")
+parser.add_argument("--logpath", default="", help="The path to the output log file")
+parser.add_argument(
+    "--resume",
+    default = "../../ckpt/meanfusion/epoch_advtrain_49.pth", #use this adv epoch 49 trained from scratch
+        # default="../../ckpt/meanfusion/epoch_49.pth",
+    type=str,
+    help="The path to the saved model that is loaded to resume training",
+)
+parser.add_argument(
+    "--resume_teacher",
+    default="",
+    type=str,
+    help="The path to the saved teacher model that is loaded to resume training",
+)
+parser.add_argument(
+    "--layer",
+    default=3,
+    type=int,
+    help="Communicate which layer in the single layer com mode",
+)
+parser.add_argument(
+    "--warp_flag", action="store_true", help="Whether to use pose info for When2com"
+)
+parser.add_argument(
+    "--kd_flag",
+    default=0,
+    type=int,
+    help="Whether to enable distillation (only DiscNet is 1 )",
+)
+parser.add_argument("--kd_weight", default=100000, type=int, help="KD loss weight")
+parser.add_argument(
+    "--gnn_iter_times",
+    default=3,
+    type=int,
+    help="Number of message passing for V2VNet",
+)
+parser.add_argument(
+    "--visualization", action="store_true", help="Visualize validation result"
+)
+parser.add_argument(
+    "--com", default="mean", type=str, help="disco/when2com/v2v/sum/mean/max/cat/agent"
+)
+parser.add_argument(
+    "--bound",
+    type=str,
+    default="both",
+    help="The input setting: lowerbound -> single-view or upperbound -> multi-view",
+)
+parser.add_argument("--inference", type=str)
+parser.add_argument("--tracking", action="store_true")
+parser.add_argument("--box_com", action="store_true")
+parser.add_argument(
+    "--no_cross_road", action="store_true", help="Do not load data of cross roads"
+)
+# scene_batch => batch size in each scene
+parser.add_argument(
+    "--num_agent", default=6, type=int, help="The total number of agents"
+)
+parser.add_argument(
+    "--apply_late_fusion",
+    default=0,
+    type=int,
+    help="1: apply late fusion. 0: no late fusion",
+)
+parser.add_argument(
+    "--compress_level",
+    default=0,
+    type=int,
+    help="Compress the communication layer channels by 2**x times in encoder",
+)
+parser.add_argument(
+    "--pose_noise",
+    default=0,
+    type=float,
+    help="draw noise from normal distribution with given mean (in meters), apply to transformation matrix.",
+)
+parser.add_argument(
+    "--only_v2i",
+    default=0,
+    type=int,
+    help="1: only v2i, 0: v2v and v2i",
+)
+
+# Adversarial perturbation
+parser.add_argument('--pert_alpha', type=float, default=0.1, help='scale of the perturbation')
+parser.add_argument('--adv_method', type=str, default='pgd', help='pgd/bim/cw-l2')
+parser.add_argument('--eps', type=float, default=0.5, help='epsilon of adv attack.')
+parser.add_argument('--adv_iter', type=int, default=15, help='adv iterations of computing perturbation')
+
+# Scene and frame settings
+parser.add_argument('--scene_id', type=list, default=[8], help='target evaluation scene') #Scene 8, 96, 97 has 6 agents.
+parser.add_argument('--sample_id', type=int, default=None, help='target evaluation sample')
+
+# Among Us modes and parameters
+parser.add_argument('--robosac', type=str, default='', help='upperbound/lowerbound/no_defense/robosac_validation/robosac_mAP/adaptive/fix_attackers/performance_eval/probing')
+parser.add_argument('--ego_agent', type=int, default=1, help='id of ego agent')
+parser.add_argument('--robosac_k', type=int, default=None, help='specify consensus set size if needed')
+parser.add_argument('--ego_loss_only', action="store_true", help='only use ego loss to compute adv perturbation')
+parser.add_argument('--step_budget', type=int, default=3, help='sampling budget in a single frame')
+parser.add_argument('--box_matching_thresh', type=float, default=0.3, help='IoU threshold for validating two detection results')
+parser.add_argument('--number_of_attackers', type=int, default=1, help='number of malicious attackers in the scene')
+parser.add_argument('--fix_attackers', action="store_true", help='if true, attackers will not change in different frames')
+parser.add_argument('--use_history_frame', action="store_true", help='use history frame for computing the consensus, reduce 1 step of forward prop.')
+parser.add_argument('--partial_upperbound', action="store_true", help='use with specifying ransan_k, to perform clean collaboration with a subset of teammates')
+parser.add_argument('--epochs', type=int, default=20, help='number of epochs for training')
+# parser.add_argument('--lr', type=float, default=0.0005, help='learning rate')
+# pretend these were passed on the command line:
+sys.argv = [
+    'notebook',           # this can be anything
+    '--data', '/home/jasdeep/Spring 2025/CSCE 753 - Computer Vision and Robot Perception/Project/ROBOSAC/V2X-Sim-det/test',
+    '--batch', '1',
+    '--epochs', '2',
+    '--lr', '0.0005',
+    '--num_agent', '6',
+    '--robosac', 'robosac_mAP',
+]
+
+args = parser.parse_args()
+print(args)
+
+def time_str():
+    t = time.time()- 60*60*24*30
+    time_string = time.strftime("%Y_%m_%d_%H:%M:%S", time.localtime(t))
+    return time_string
+
+def check_folder(folder_path):
+    if not os.path.exists(folder_path):
+        os.mkdir(folder_path)
+    return folder_path
+
+def visualize(config, filename0, save_fig_path, fafmodule, data, num_agent_list, padded_voxel_point, gt_max_iou, vis_tag):
+    print("Visualizing: {}".format(vis_tag))
+    det_results_local = [[] for i in range(6)]
+    annotations_local = [[] for i in range(6)]
+
+    padded_voxel_point = data['bev_seq']
+    padded_voxel_points_teacher = data['bev_seq_teacher']
+    reg_target = data['reg_targets']
+    anchors_map = data['anchors']
+
+    loss, cls_loss, loc_loss, result = fafmodule.predict_all(data, 1, num_agent=num_agent_list[0][0])
+            
+    # local qualitative evaluation
+    num_sensor = num_agent_list[0][0].numpy()
+    print(f'num_sensor: {num_sensor}')
+    for k in range(num_sensor):
+        data_agents = {'bev_seq': torch.unsqueeze(padded_voxel_point[k, :, :, :, :], 1),
+                    'bev_seq_teacher': torch.unsqueeze(padded_voxel_points_teacher[k, :, :, :, :], 1),
+                    'reg_targets': torch.unsqueeze(reg_target[k, :, :, :, :, :], 0),
+                    'anchors': torch.unsqueeze(anchors_map[k, :, :, :, :], 0)}
+        temp = gt_max_iou[k]
+        data_agents['gt_max_iou'] = temp[0]['gt_box'][0, :, :]
+        result_temp = result[k]
+        
+        temp = {'bev_seq': data_agents['bev_seq'][0, -1].cpu().numpy(), 
+                'bev_seq_teacher': data_agents['bev_seq_teacher'][0, -1].cpu().numpy(),
+                'result': result_temp[0][0],
+                'reg_targets': data_agents['reg_targets'].cpu().numpy()[0],
+                'anchors_map': data_agents['anchors'].cpu().numpy()[0],
+                'gt_max_iou': data_agents['gt_max_iou'],
+                'vis_tag': vis_tag}
+        
+        det_results_local[k], annotations_local[k] = cal_local_mAP(config, temp, det_results_local[k], annotations_local[k])
+        print("Agent {}:".format(k))
+        filename = str(filename0[0][0])
+        cut = filename[filename.rfind('agent') + 7:]
+        seq_name = cut[:cut.rfind('_')]
+        idx = cut[cut.rfind('_') + 1:cut.rfind('/')]
+        seq_save = os.path.join(save_fig_path[k], seq_name)
+        check_folder(seq_save)
+        idx_save = '{}_{}.png'.format(str(idx), vis_tag)
+
+        if args.visualization:
+            visualization(config, temp, None, None, 0, os.path.join(seq_save, idx_save))
+
+def cal_robosac_consensus(num_agent, step_budget, num_attackers):
+    num_agent = num_agent - 1
+    eta = num_attackers / num_agent
+    s = np.floor(np.log(1-np.power(1-0.99, 1/step_budget)) / np.log(1-eta)).astype(int)
+    return s
+
+def get_jaccard_index(config, num_agent_list, padded_voxel_point, reg_target, anchors_map, gt_max_iou, result_1, result_2):
+    num_sensor = num_agent_list[0][0].numpy()
+    det_results_local_1 = [[] for i in range(num_sensor)]
+    annotations_local_1 = [[] for i in range(num_sensor)]
+    det_results_local_2 = [[] for i in range(num_sensor)]
+    annotations_local_2 = [[] for i in range(num_sensor)]
+    ego_idx = args.ego_agent
+    # for k in range(num_sensor):
+    data_agents = {'bev_seq': torch.unsqueeze(padded_voxel_point[ego_idx, :, :, :, :], 1),
+                'reg_targets': torch.unsqueeze(reg_target[ego_idx, :, :, :, :, :], 0),
+                'anchors': torch.unsqueeze(anchors_map[ego_idx, :, :, :, :], 0)}
+    temp = gt_max_iou[ego_idx]
+    data_agents['gt_max_iou'] = temp[0]['gt_box'][0, :, :]
+    result_temp_1 = result_1[ego_idx]
+    result_temp_2 = result_2[ego_idx]
+    temp_1 = {'bev_seq': data_agents['bev_seq'][0, -1].cpu().numpy(), 'result': result_temp_1[0][0],
+            'reg_targets': data_agents['reg_targets'].cpu().numpy()[0],
+            'anchors_map': data_agents['anchors'].cpu().numpy()[0],
+            'gt_max_iou': data_agents['gt_max_iou']}
+    temp_2 = {'bev_seq': data_agents['bev_seq'][0, -1].cpu().numpy(), 'result': result_temp_2[0][0],
+            'reg_targets': data_agents['reg_targets'].cpu().numpy()[0],
+            'anchors_map': data_agents['anchors'].cpu().numpy()[0],
+            'gt_max_iou': data_agents['gt_max_iou']}
+    
+    det_results_local_1[ego_idx], annotations_local_1[ego_idx] = cal_local_mAP(config, temp_1, det_results_local_1[ego_idx], annotations_local_1[ego_idx])
+    det_results_local_2[ego_idx], annotations_local_2[ego_idx] = cal_local_mAP(config, temp_2, det_results_local_2[ego_idx], annotations_local_2[ego_idx])
+    
+    print("Calculating in the view of Agent {}:".format(ego_idx))
+    # shape of det_results_local_1 [k][0][0] is (N, 9)
+    # The final value of the array is confidence. Ignored
+    if len(det_results_local_1[ego_idx]) == 0:
+        # if ego have no detection, return 0
+        return 0 
+    det_1 = det_results_local_1[ego_idx][0][0][:,0:8]
+    det_2 = det_results_local_2[ego_idx][0][0][:,0:8]
+    # jac_index = calculate_jaccard(det_results_local_1[k][0][0], det_results_local_2[k][0][0])
+    jac_index = associate_2_detections(det_1, det_2)
+    return jac_index
+
+
+def local_eval(num_agent, padded_voxel_points, reg_target, anchors_map, gt_max_iou, result, config, det_results_local, annotations_local):
+    # If has RSU, do not count RSU's output into evaluation
+    # eval_start_idx = 0 if args.no_cross_road else 1
+    eval_start_idx = 0
+    # update global result
+    for k in range(eval_start_idx, num_agent):
+        data_agents = {
+            "bev_seq": torch.unsqueeze(padded_voxel_points[k, :, :, :, :], 1),
+            "reg_targets": torch.unsqueeze(reg_target[k, :, :, :, :, :], 0),
+            "anchors": torch.unsqueeze(anchors_map[k, :, :, :, :], 0),
+        }
+        temp = gt_max_iou[k]
+
+        if len(temp[0]["gt_box"]) == 0:
+            data_agents["gt_max_iou"] = []
+        else:
+            data_agents["gt_max_iou"] = temp[0]["gt_box"][0, :, :]
+
+
+        result_temp = result[k]
+
+        temp = {
+            "bev_seq": data_agents["bev_seq"][0, -1].cpu().numpy(),
+            "result": [] if len(result_temp) == 0 else result_temp[0][0],
+            "reg_targets": data_agents["reg_targets"].cpu().numpy()[0],
+            "anchors_map": data_agents["anchors"].cpu().numpy()[0],
+            "gt_max_iou": data_agents["gt_max_iou"],
+        }
+        det_results_local[k], annotations_local[k] = cal_local_mAP(
+            config, temp, det_results_local[k], annotations_local[k]
+        )
+    return det_results_local, annotations_local
+
+def cal_robosac_steps(num_agent, num_consensus, num_attackers):
+    # exclude ego agent
+    num_agent = num_agent - 1
+    eta = num_attackers / num_agent
+    # print(f'eta: {eta}')
+    # print(f's(num_agent): {num_agent}')
+    N = np.ceil(np.log(1 - 0.99) / np.log(1 - np.power(1 - eta, num_consensus))).astype(int)
+    return N
+
+class Discriminator(nn.Module):
+    """Binary discriminator for 256x32x32 feature maps."""
+    def __init__(self):
+        super(Discriminator, self).__init__()
+        self.conv1 = nn.Conv2d(512, 64, kernel_size=3, stride=2, padding=1)  # out: 64x16x16
+        self.bn1 = nn.BatchNorm2d(64)
+        self.conv2 = nn.Conv2d(64, 16, kernel_size=3, stride=2, padding=1)   # out: 16x8x8
+        self.bn2 = nn.BatchNorm2d(16)
+        self.fc = nn.Linear(256, 1)  # final binary logit output
+
+    def forward(self, x):
+        # x shape: (N, 256, 32, 32)
+        x = torch.relu(self.bn1(self.conv1(x)))
+        x = torch.relu(self.bn2(self.conv2(x)))
+        x = x.view(x.size(0), -1)   # flatten
+        x = self.fc(x)
+        return x  # raw logit (use sigmoid in evaluation if needed)
+
+config = Config("train", binary=True, only_det=True)
+config_global = ConfigGlobal("train", binary=True, only_det=True)
+
+need_log = args.log
+num_workers = args.nworker
+apply_late_fusion = args.apply_late_fusion
+pose_noise = args.pose_noise
+compress_level = args.compress_level
+only_v2i = args.only_v2i
+batch_size = args.batch
+
+# Specify gpu device
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device_num = torch.cuda.device_count()
+print("device number", device_num)
+
+config.inference = args.inference
+if args.bound == "upperbound":
+    flag = "upperbound"
+else:
+    if args.com == "when2com":
+        flag = "when2com"
+        if args.inference == "argmax_test":
+            flag = "who2com"
+        if args.warp_flag:
+            flag = flag + "_warp"
+    elif args.com in {"v2v", "disco", "sum", "mean", "max", "cat", "agent"}:
+        flag = args.com
+    else:
+        flag = "lowerbound"
+        if args.box_com:
+            flag += "_box_com"
+
+print("flag", flag)
+config.flag = flag
+config.split = "test"
+
+
+num_agent = args.num_agent
+# agent0 is the cross road
+agent_idx_range = range(1, num_agent) if args.no_cross_road else range(num_agent)
+full_dataset = V2XSimDet(
+    dataset_roots=[f"{args.data}/agent{i}" for i in agent_idx_range],
+    config=config,
+    config_global=config_global,
+    split="val",
+    val=True,
+    bound=args.bound,
+    kd_flag=args.kd_flag,
+    no_cross_road=args.no_cross_road,
+)
+
+# all_scenes = sorted(set(full_dataset.seq_scenes[0]))      # e.g. [1,2,3,…,10]
+
+# 2) split scene IDs 80/20
+# random.seed(0)                                           # for reproducibility
+# random.shuffle(all_scenes)
+# n_train = int(0.8 * len(all_scenes))
+# train_scenes = set(all_scenes[:n_train])
+# val_scenes   = set(all_scenes[n_train:])
+
+# 3) collect sample‐indices belonging to each split
+# train_idx = [i for i, sc in enumerate(full_dataset.seq_scenes[0]) if sc in train_scenes]
+# val_idx   = [i for i, sc in enumerate(full_dataset.seq_scenes[0]) if sc in val_scenes]
+
+# print(f"{len(train_idx)} samples in {len(train_scenes)} train scenes {train_scenes}")
+# print(f"{len(val_idx)} samples in {len(val_scenes)}   val scenes {val_scenes}")
+
+
+# 4) wrap them in Subsets + DataLoaders
+# train_dataset = Subset(full_dataset, train_idx)
+# val_dataset   = Subset(full_dataset, val_idx)
+
+# train_loader = DataLoader(train_dataset,
+#                           batch_size=1,
+#                           shuffle=True,
+#                           num_workers=num_workers)
+# val_loader   = DataLoader(val_dataset,
+#                           batch_size=1,
+#                           shuffle=False,
+#                           num_workers=num_workers)
+
+# validation_data_loader = DataLoader(full_dataset, batch_size=1, shuffle=False, num_workers=num_workers)
+# 2. compute split sizes
+total_scenes = len(full_dataset)
+val_size   = int(0.2 * total_scenes)
+train_size = total_scenes - val_size
+
+# 3. do the random split (shuffles indices for you)
+train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
+
+# 4. wrap in loaders
+train_loader = DataLoader(train_dataset,
+                          batch_size=1,
+                          shuffle=True,      # shuffle for training
+                          num_workers=num_workers)
+val_loader   = DataLoader(val_dataset,
+                          batch_size=1,
+                          shuffle=False,     # no need to shuffle val
+                          num_workers=num_workers)
+
+print(f"Train/Val sizes: {len(train_dataset)}/{len(val_dataset)}")
+
+print("Dataset size:", len(full_dataset))
+
+if args.no_cross_road:
+    num_agent -= 1
+
+
+if args.com == "mean":
+    model = MeanFusion(
+        config,
+        layer=args.layer,
+        kd_flag=args.kd_flag,
+        num_agent=num_agent,
+        compress_level=compress_level,
+        only_v2i=only_v2i,
+    )
+
+model = nn.DataParallel(model)
+model = model.to(device)
+optimizer = optim.Adam(model.parameters(), lr=0.001)
+criterion = {
+    "cls": SoftmaxFocalClassificationLoss(),
+    "loc": WeightedSmoothL1LocalizationLoss(),
+}
+
+fafmodule = FaFModule(model, model, config, optimizer, criterion, args.kd_flag)
+
+model_save_path = args.resume[: args.resume.rfind("/")]
+
+if args.inference == "argmax_test":
+    model_save_path = model_save_path.replace("when2com", "who2com")
+
+os.makedirs(model_save_path, exist_ok=True)
+
+checkpoint = torch.load(
+    args.resume, map_location="cpu"
+)  # We have low GPU utilization for testing
+start_epoch = checkpoint["epoch"] + 1
+
+fafmodule.model.load_state_dict(checkpoint["model_state_dict"])
+fafmodule.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+fafmodule.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+print("Load model from {}, at epoch {}".format(args.resume, start_epoch - 1))
+
+if args.log:
+    log_file_name = os.path.join(model_save_path, "log_epoch{}_scene{}_ego{}_{}attackers_{}_{}.txt".format(checkpoint["epoch"], args.scene_id, args.ego_agent, args.number_of_attackers, args.robosac, time_str()))
+    saver = open(log_file_name, "a")
+    saver.write("GPU number: {}\n".format(torch.cuda.device_count()))
+    saver.flush()
+
+    # Logging the details for this experiment
+    saver.write("command line: {}\n".format(" ".join(sys.argv[1:])))
+    saver.write(args.__repr__() + "\n\n")
+    saver.flush()
+
+def print_and_write_log(log_str):
+    print(log_str)
+    if args.log:
+        saver.write(log_str + "\n")
+        saver.flush()
+
+fafmodule.model.eval()
+save_fig_path = [
+    check_folder(os.path.join(model_save_path, f"vis{i}")) for i in agent_idx_range
+]
+tracking_path = [
+    check_folder(os.path.join(model_save_path, f"tracking{i}"))
+    for i in agent_idx_range
+]
+
+det_results_local = [[] for i in agent_idx_range]
+annotations_local = [[] for i in agent_idx_range]
+
+for k, v in fafmodule.model.named_parameters():
+    v.requires_grad = False  # fix parameters
+
+
+
+assert args.robosac in ["upperbound", "lowerbound", "no_defense", "robosac_validation", "robosac_mAP", "adaptive", "fix_attackers", "performance_eval", "probing"]
+
+# NOTE: ONLY SUPPORT SINGLE SCENE BY NOW
+frame_count = 100
+# array for robosac total steps
+steps = np.zeros(frame_count)
+# array for ego prediction count
+ego_steps = np.zeros(frame_count)
+fpss = np.zeros(frame_count)
+
+# array for consensus set sizes(for adaptive sampling)
+consensus_set_sizes = np.zeros(frame_count)
+
+# start from select 1 collab agent(for adaptive sampling)
+# keep it out of the loop for not initializing every time
+consensus_set_size = 1
+
+# cnt for adaptive sampling steps from frame 0 
+total_adaptive_steps = 0
+
+# once failed, need a flag to record(for adaptive sampling)
+failed_once = False
+
+# for probing
+N_th_frame_of_each_estimation = [-1] * 5
+# TODO: set ratios as input
+estimate_attacker_ratio = [0.0, 0.2, 0.4, 0.6, 0.8]
+estimated_attacker_ratio = 1.0
+
+consensus_tries = [5,4,3,2,1]
+consensus_tries_is_needed = [1,1,1,1,1]
+# probing_step_limit_by_attacker_ratio
+NMax = []
+for ratio in estimate_attacker_ratio:
+    # TODO: set 5 to a variable
+    temp_num_attackers = round(5 * (ratio))
+    temp_num_consensus = 5 - temp_num_attackers
+    NMax.append(cal_robosac_steps(num_agent, temp_num_consensus, temp_num_attackers))
+
+# Special case when assuming all agents are benign.(i.e. attacker ratio = 1.0)
+# means once if we can't test consensus in 1 try, there's definitely at least 1 attacker.
+NMax[0] = 1
+# print("NMax:", NMax)
+# {5: 1, 4: 9, 3: 19, 2: 27, 1: 21}
+NTry = [0] * len(estimate_attacker_ratio)
+total_sampling_step =0
+
+# succ count for robosac eval
+succ = 0 
+partial_succ = 0
+fail = 0
+# counters for relative frame in a single scene
+frame_seq = 0
+
+fix_attackers_generated = False
+fix_attackers_collab_agent_list = []
+fix_attackers_total_step = 0
+
+discriminator = Discriminator().to(device)
+optimizer_disc = optim.Adam(discriminator.parameters(), lr=args.lr)
+criterion_disc = nn.BCEWithLogitsLoss()
+
+print(f"Train/Val sizes: {len(train_dataset)}/{len(val_dataset)}")
+
+# Training loop
+discriminator.train()
+
+for epoch in range(1, args.epochs + 1):
+    total_loss = 0.0
+    # count = 0
+    for cnt, sample in enumerate(tqdm(train_loader)):
+
+        t = time.time()
+        (
+            padded_voxel_point_list,
+            padded_voxel_points_teacher_list,
+            label_one_hot_list,
+            reg_target_list,
+            reg_loss_mask_list,
+            anchors_map_list,
+            vis_maps_list,
+            gt_max_iou,
+            filenames,
+            target_agent_id_list,
+            num_agent_list,
+            trans_matrices_list,
+        ) = zip(*sample)
+
+        # filename0 = filenames[0]  #'/home/jasdeep/Spring 2025/CSCE 753 - Computer Vision and Robot Perception/Project/ROBOSAC/V2X-Sim-det/test/agent0/5_0/0.npy'
+        # filename = str(filename0[0][0])
+        # cut = filename[filename.rfind('agent') + 7:] #5_0/0.npy
+        # seq_name = cut[:cut.rfind('_')] #5
+        # idx = cut[cut.rfind('_') + 1:cut.rfind('/')] #0
+        # print("seq_name", seq_name)
+
+        # if (int(seq_name) not in args.scene_id):
+        #     continue
+
+        # if (args.sample_id is not None):
+        #     if (int(idx) < args.sample_id):
+        #         continue
+
+        frame_seq += 1
+        # print_and_write_log("\nScene {}, Frame {}:".format(seq_name, idx))
+        trans_matrices = torch.stack(tuple(trans_matrices_list), 1)
+        
+        # print(trans_matrices.shape)
+        target_agent_ids = torch.stack(tuple(target_agent_id_list), 1)
+        num_all_agents = torch.stack(tuple(num_agent_list), 1)
+
+        # if args.no_cross_road:
+        #     num_all_agents -= 1
+        
+        
+        padded_voxel_points = torch.cat(tuple(padded_voxel_point_list), 0) 
+        
+        # print("padded_voxel_points", padded_voxel_points.shape)
+        padded_voxel_points_teacher = torch.cat(tuple(padded_voxel_points_teacher_list), 0)
+        
+        
+        label_one_hot = torch.cat(tuple(label_one_hot_list), 0)
+        
+        
+        reg_target = torch.cat(tuple(reg_target_list), 0)
+        
+        
+        reg_loss_mask = torch.cat(tuple(reg_loss_mask_list), 0)
+        
+        
+        anchors_map = torch.cat(tuple(anchors_map_list), 0)
+        
+        
+        vis_maps = torch.cat(tuple(vis_maps_list), 0)
+        
+        # print("trans_matrices shape:", trans_matrices.shape)
+        # print("target_agent_ids", target_agent_ids)
+        # print("num agent list", num_agent_list)
+        # print("num_all_agents", num_all_agents)
+        # print("padded_voxel_points", padded_voxel_points.shape)
+        # print("padded_voxel_points_teacher", padded_voxel_points_teacher.shape)
+        # print("label_one_hot", label_one_hot.shape)
+        # print("reg_target", reg_target.shape)
+        # print("reg_loss_mask", reg_loss_mask.shape)
+        # print("anchors_map", anchors_map.shape)
+        # print("vis_maps", vis_maps)
+        
+        data = {
+        "bev_seq": padded_voxel_points.to(device),
+        "bev_seq_teacher": padded_voxel_points_teacher.to(device),
+        "labels": label_one_hot.to(device),
+        "reg_targets": reg_target.to(device),
+        "anchors": anchors_map.to(device),
+        "vis_maps": vis_maps.to(device),
+        "reg_loss_mask": reg_loss_mask.to(device).type(dtype=torch.bool),
+        "target_agent_ids": target_agent_ids.to(device),
+        "num_agent": num_all_agents.to(device),
+        'ego_agent': args.ego_agent,
+        'pert': None,
+        'no_fuse': False,
+        'collab_agent_list': None,
+        'trial_agent_id': None,
+        'confidence': None,
+        'unadv_pert': None,
+        'attacker_list' : None,
+        'eps': None,
+        "trans_matrices": trans_matrices.to(device),
+        }
+
+        # cls_result contains classification predictions from the model
+        # Shape: [batch_size, num_classes, H, W] or [num_agents, num_classes, H, W] 
+        # Contains probability scores for each anchor box location indicating object presence
+        # Used for generating pseudo ground truth labels for discriminator training
+        cls_result  = fafmodule.cls_predict(data, batch_size, no_fuse=True)
+        mean = torch.mean(cls_result, dim=2)
+        cls_result[:,:,0] = cls_result[:,:,0] > mean
+        cls_result[:,:,1] = cls_result[:,:,1] > mean
+        pseudo_gt = cls_result.clone().detach()
+        if args.adv_method == 'pgd':
+            # PGD random init   
+            pert = torch.randn(6, 256, 32, 32) * 0.1
+        elif args.adv_method == 'bim' or args.adv_method == 'cw-l2':
+            # BIM/CW-L2 zero init
+            pert = torch.zeros(6, 256, 32, 32)
+        else:
+            raise NotImplementedError
+
+
+        num_sensor = num_agent_list[0][0]
+        
+        ego_idx = args.ego_agent
+        all_agent_list = [i for i in range(num_sensor)]
+        # We always trust ourself
+        all_agent_list.remove(ego_idx)
+        attacker_list = random.sample(all_agent_list, k=args.number_of_attackers)
+        data['attacker_list'] = attacker_list
+        data['eps'] = args.eps
+        data['no_fuse'] = False
+        for i in range(args.adv_iter):
+            pert.requires_grad = True
+            # Introduce adv perturbation
+            data['pert'] = pert.to(device)
+                    
+            # STEP 3: Use inverted classification ground truth, minimze loss wrt inverted gt, to generate adv attacks based on cls(only)
+            # NOTE: Actual ground truth is not always available especially in real-world attacks
+            # We define the adversarial loss of the perturbed output with respect to an unperturbed output pseudo_gt instead of the ground truth
+            cls_loss = fafmodule.cls_step(data, batch_size, ego_loss_only=args.ego_loss_only, ego_agent=args.ego_agent, invert_gt=True, self_result=pseudo_gt, adv_method=args.adv_method)
+
+            pert = pert + args.pert_alpha * pert.grad.sign() * -1
+            pert.detach_()
+
+        # print("cls_result", cls_result.shape)
+        # print("mean", mean.shape)
+        # print("pseudo_gt", pseudo_gt.shape)
+        # print("pert", pert.shape)
+        # print("num_sensor", num_sensor)
+        # print("ego_idx", ego_idx)
+        # print("all_agent_list", all_agent_list)
+        # print("all_agent_list", all_agent_list)
+        # print("attacker_list", attacker_list)
+        # print("pert", pert.shape)
+        pert = pert.detach().clone()
+        # Apply the final perturbation to attackers' feature maps.
+        data['pert'] = pert.to(device)
+        # print_and_write_log("Perturbation is applied on agent {}".format(attacker_list))
+
+
+
+
+
+
+
+        with torch.no_grad():
+            # Get raw backbone features (list of agent feature tensors)
+            # If no direct method, we simulate by splitting input per agent
+            agent_feats = []
+            for j in range(num_all_agents[0][0]):
+                # single_bev = data["bev_seq"][j].unsqueeze(0)  # shape [1, C, H, W]
+                # single_bev = padded_voxel_points[j].unsqueeze(0).unsqueeze(1)  # [1, 1, 13, 256, 256]
+                # single_bev = padded_voxel_points[j].permute(2, 0, 1)  # [13, 256, 256]
+                # single_bev = single_bev.unsqueeze(0).unsqueeze(0)     # [1, 1, 13, 256, 256]
+                single_bev = padded_voxel_points[j].permute(0, 3, 1, 2)  # [1, 13, 256, 256]
+                single_bev = single_bev.unsqueeze(0)                     # [1, 1, 13, 256, 256]
+                single_bev = single_bev.to(device)
+                # print("single_bev", single_bev.shape)
+                # Forward through backbone (e.g., first stage of detection model)
+                # feat_j = model.module.backbone(single_bev, torch.unsqueeze(trans_matrices[:, j], 1))
+                feat_j = model.module.u_encoder(single_bev)[-1]  # shape: [1, 1, 13, H, W]
+                # print("feat_j", feat_j.shape)
+                agent_feats.append(feat_j.squeeze(0))
+                # break
+        features_all = torch.stack(agent_feats, dim=0)  # shape [6, 512, 16, 16]
+        # print("features_all", features_all.shape)
+        # Add adversarial perturbation to attacker's feature map(s)
+        # Match perturbation shape to feature map
+        # pert = F.interpolate(pert, size=features_all.shape[-2:], mode='bilinear', align_corners=True)
+        # Ensure pert matches feature shape (C, H, W)
+        if pert.shape[1] != features_all.shape[1]:
+            # print("pert before interpolation", pert.shape)
+            pert = F.interpolate(pert, size=features_all.shape[-2:], mode='bilinear', align_corners=True)
+            # print("pert after interpolation", pert.shape)
+            if pert.shape[1] < features_all.shape[1]:
+                # Pad channels
+                pad_channels = features_all.shape[1] - pert.shape[1]
+                pert = F.pad(pert, (0, 0, 0, 0, 0, pad_channels))
+            elif pert.shape[1] > features_all.shape[1]:
+                # Trim channels
+                pert = pert[:, :features_all.shape[1], :, :]
+        # print("pert after padding", pert.shape)
+        pert = pert.to(features_all.device)
+        
+        for att_id in attacker_list:
+            features_all[att_id] += pert[att_id]
+        # Step 4: Prepare discriminator training batch
+        N = num_all_agents[0][0].item()
+        # Exclude ego's own feature? Ego is always benign, we can include it as benign sample too
+        feature_batch = features_all  # shape [N, 256, 32, 32]
+        # Labels: 1 for attacker, 0 for others
+        labels_batch = torch.zeros(N, device=device)
+        for att_id in attacker_list:
+            labels_batch[att_id] = 1.0
+        # Step 5: Train discriminator on this batch
+        logits = discriminator(feature_batch)  # shape [N, 1]
+        logits = logits.view(-1)  # flatten to shape [N]
+        loss = criterion_disc(logits, labels_batch)
+        optimizer_disc.zero_grad()
+        loss.backward()
+        optimizer_disc.step()
+        total_loss += loss.item()
+        # count += 1
+    avg_train_loss = total_loss / (cnt+1)
+    print(f"Epoch {epoch}: train loss = {avg_train_loss:.4f}")
+
+    discriminator.eval()
+    val_loss = 0
+
+    with torch.no_grad():
+
+        for cnt, sample in enumerate(tqdm(val_loader)):
+
+            t = time.time()
+            (
+                padded_voxel_point_list,
+                padded_voxel_points_teacher_list,
+                label_one_hot_list,
+                reg_target_list,
+                reg_loss_mask_list,
+                anchors_map_list,
+                vis_maps_list,
+                gt_max_iou,
+                filenames,
+                target_agent_id_list,
+                num_agent_list,
+                trans_matrices_list,
+            ) = zip(*sample)
+
+            filename0 = filenames[0]  #'/home/jasdeep/Spring 2025/CSCE 753 - Computer Vision and Robot Perception/Project/ROBOSAC/V2X-Sim-det/test/agent0/5_0/0.npy'
+            filename = str(filename0[0][0])
+            cut = filename[filename.rfind('agent') + 7:] #5_0/0.npy
+            seq_name = cut[:cut.rfind('_')] #5
+            idx = cut[cut.rfind('_') + 1:cut.rfind('/')] #0
+            # print("seq_name", seq_name)
+
+            if (int(seq_name) not in args.scene_id):
+                continue
+
+            if (args.sample_id is not None):
+                if (int(idx) < args.sample_id):
+                    continue
+
+            frame_seq += 1
+            # print_and_write_log("\nScene {}, Frame {}:".format(seq_name, idx))
+            trans_matrices = torch.stack(tuple(trans_matrices_list), 1)
+            # print("trans_matrices shape:", trans_matrices.shape)
+            
+            print(trans_matrices.shape)
+            target_agent_ids = torch.stack(tuple(target_agent_id_list), 1)
+            # print("target_agent_ids", target_agent_ids)
+            
+            # print("num agent list", num_agent_list)
+            num_all_agents = torch.stack(tuple(num_agent_list), 1)
+            # print("num_all_agents", num_all_agents)
+
+            # if args.no_cross_road:
+            #     num_all_agents -= 1
+            
+            
+            padded_voxel_points = torch.cat(tuple(padded_voxel_point_list), 0) 
+            # print("padded_voxel_points", padded_voxel_points.shape)
+            
+            print("padded_voxel_points", padded_voxel_points.shape)
+            padded_voxel_points_teacher = torch.cat(tuple(padded_voxel_points_teacher_list), 0)
+            # print("padded_voxel_points_teacher", padded_voxel_points_teacher.shape)
+            
+            
+            label_one_hot = torch.cat(tuple(label_one_hot_list), 0)
+            # print("label_one_hot", label_one_hot.shape)
+            
+            
+            reg_target = torch.cat(tuple(reg_target_list), 0)
+            # print("reg_target", reg_target.shape)
+            
+            
+            reg_loss_mask = torch.cat(tuple(reg_loss_mask_list), 0)
+            # print("reg_loss_mask", reg_loss_mask.shape)
+            
+            
+            anchors_map = torch.cat(tuple(anchors_map_list), 0)
+            # print("anchors_map", anchors_map.shape)
+            
+            
+            vis_maps = torch.cat(tuple(vis_maps_list), 0)
+            # print("vis_maps", vis_maps)
+            data = {
+            "bev_seq": padded_voxel_points.to(device),
+            "bev_seq_teacher": padded_voxel_points_teacher.to(device),
+            "labels": label_one_hot.to(device),
+            "reg_targets": reg_target.to(device),
+            "anchors": anchors_map.to(device),
+            "vis_maps": vis_maps.to(device),
+            "reg_loss_mask": reg_loss_mask.to(device).type(dtype=torch.bool),
+            "target_agent_ids": target_agent_ids.to(device),
+            "num_agent": num_all_agents.to(device),
+            'ego_agent': args.ego_agent,
+            'pert': None,
+            'no_fuse': False,
+            'collab_agent_list': None,
+            'trial_agent_id': None,
+            'confidence': None,
+            'unadv_pert': None,
+            'attacker_list' : None,
+            'eps': None,
+            "trans_matrices": trans_matrices.to(device),
+            }
+
+            # cls_result contains classification predictions from the model
+            # Shape: [batch_size, num_classes, H, W] or [num_agents, num_classes, H, W] 
+            # Contains probability scores for each anchor box location indicating object presence
+            # Used for generating pseudo ground truth labels for discriminator training
+            cls_result  = fafmodule.cls_predict(data, batch_size, no_fuse=True)
+            # print("cls_result", cls_result.shape)
+            mean = torch.mean(cls_result, dim=2)
+            # print("mean", mean.shape)
+            cls_result[:,:,0] = cls_result[:,:,0] > mean
+            cls_result[:,:,1] = cls_result[:,:,1] > mean
+            pseudo_gt = cls_result.clone().detach()
+            # print("pseudo_gt", pseudo_gt.shape)
+            if args.adv_method == 'pgd':
+                # PGD random init   
+                pert = torch.randn(6, 256, 32, 32) * 0.1
+            elif args.adv_method == 'bim' or args.adv_method == 'cw-l2':
+                # BIM/CW-L2 zero init
+                pert = torch.zeros(6, 256, 32, 32)
+            else:
+                raise NotImplementedError
+            # print("pert", pert.shape)
+
+
+            num_sensor = num_agent_list[0][0]
+            # print("num_sensor", num_sensor)
+            
+            ego_idx = args.ego_agent
+            # print("ego_idx", ego_idx)
+            all_agent_list = [i for i in range(num_sensor)]
+            # print("all_agent_list", all_agent_list)
+            # We always trust ourself
+            all_agent_list.remove(ego_idx)
+            # print("all_agent_list", all_agent_list)
+            attacker_list = random.sample(all_agent_list, k=args.number_of_attackers)
+            # print("attacker_list", attacker_list)
+            data['attacker_list'] = attacker_list
+            data['eps'] = args.eps
+            data['no_fuse'] = False
+            for i in range(args.adv_iter):
+                pert.requires_grad = True
+                # Introduce adv perturbation
+                data['pert'] = pert.to(device)
+                        
+                # STEP 3: Use inverted classification ground truth, minimze loss wrt inverted gt, to generate adv attacks based on cls(only)
+                # NOTE: Actual ground truth is not always available especially in real-world attacks
+                # We define the adversarial loss of the perturbed output with respect to an unperturbed output pseudo_gt instead of the ground truth
+                cls_loss = fafmodule.cls_step(data, batch_size, ego_loss_only=args.ego_loss_only, ego_agent=args.ego_agent, invert_gt=True, self_result=pseudo_gt, adv_method=args.adv_method)
+
+                pert = pert + args.pert_alpha * pert.grad.sign() * -1
+                pert.detach_()
+
+            # print("pert", pert.shape)
+            pert = pert.detach().clone()
+            # Apply the final perturbation to attackers' feature maps.
+            data['pert'] = pert.to(device)
+            # print_and_write_log("Perturbation is applied on agent {}".format(attacker_list))
+
+
+
+
+
+
+
+            # Get raw backbone features (list of agent feature tensors)
+            # If no direct method, we simulate by splitting input per agent
+            agent_feats = []
+            for j in range(num_all_agents[0][0]):
+                # single_bev = data["bev_seq"][j].unsqueeze(0)  # shape [1, C, H, W]
+                # single_bev = padded_voxel_points[j].unsqueeze(0).unsqueeze(1)  # [1, 1, 13, 256, 256]
+                # single_bev = padded_voxel_points[j].permute(2, 0, 1)  # [13, 256, 256]
+                # single_bev = single_bev.unsqueeze(0).unsqueeze(0)     # [1, 1, 13, 256, 256]
+                single_bev = padded_voxel_points[j].permute(0, 3, 1, 2)  # [1, 13, 256, 256]
+                single_bev = single_bev.unsqueeze(0)                     # [1, 1, 13, 256, 256]
+                single_bev = single_bev.to(device)
+                # print("single_bev", single_bev.shape)
+                # Forward through backbone (e.g., first stage of detection model)
+                # feat_j = model.module.backbone(single_bev, torch.unsqueeze(trans_matrices[:, j], 1))
+                feat_j = model.module.u_encoder(single_bev)[-1]  # shape: [1, 1, 13, H, W]
+                # print("feat_j", feat_j.shape)
+                agent_feats.append(feat_j.squeeze(0))
+                    # break
+            features_all = torch.stack(agent_feats, dim=0)  # shape [6, 512, 16, 16]
+            # print("features_all", features_all.shape)
+            # Add adversarial perturbation to attacker's feature map(s)
+            # Match perturbation shape to feature map
+            # pert = F.interpolate(pert, size=features_all.shape[-2:], mode='bilinear', align_corners=True)
+            # Ensure pert matches feature shape (C, H, W)
+            if pert.shape[1] != features_all.shape[1]:
+                # print("pert before interpolation", pert.shape)
+                pert = F.interpolate(pert, size=features_all.shape[-2:], mode='bilinear', align_corners=True)
+                # print("pert after interpolation", pert.shape)
+                if pert.shape[1] < features_all.shape[1]:
+                    # Pad channels
+                    pad_channels = features_all.shape[1] - pert.shape[1]
+                    pert = F.pad(pert, (0, 0, 0, 0, 0, pad_channels))
+                elif pert.shape[1] > features_all.shape[1]:
+                    # Trim channels
+                    pert = pert[:, :features_all.shape[1], :, :]
+            # print("pert after padding", pert.shape)
+            pert = pert.to(features_all.device)
+            
+            for att_id in attacker_list:
+                features_all[att_id] += pert[att_id]
+            
+            # Step 4: Prepare discriminator training batch
+            N = num_all_agents[0][0].item()
+            # Exclude ego's own feature? Ego is always benign, we can include it as benign sample too
+            feature_batch = features_all  # shape [N, 256, 32, 32]
+            # Labels: 1 for attacker, 0 for others
+            labels_batch = torch.zeros(N, device=device)
+            for att_id in attacker_list:
+                labels_batch[att_id] = 1.0
+            
+            # Step 5: Train discriminator on this batch
+            logits = discriminator(feature_batch)  # shape [N, 1]
+            logits = logits.view(-1)  # flatten to shape [N]
+            loss = criterion_disc(logits, labels_batch)
+            val_loss += loss.item()
+        avg_val_loss = val_loss / (cnt+1)
+        print(f"Epoch {epoch}: validation loss = {avg_val_loss:.4f}")
+
+
+
+
