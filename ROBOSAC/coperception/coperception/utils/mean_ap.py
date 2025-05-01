@@ -1,6 +1,6 @@
 from multiprocessing import Pool
 import numpy as np
-from mmcv.utils import print_log
+# from mmcv import print_log
 from terminaltables import AsciiTable
 from coperception.utils.postprocess import *
 
@@ -337,64 +337,123 @@ def get_cls_results(det_results, annotations, class_id):
     return cls_dets, cls_gts, cls_gts_ignore
 
 
-def print_map_summary(mean_ap, results, dataset=None, scale_ranges=None, logger=None):
-    """Print mAP and results of each class.
-    A table will be printed to show the gts/dets/recall/AP of each class and
-    the mAP.
-    Args:
-        mean_ap (float): Calculated from `eval_map()`.
-        results (list[dict]): Calculated from `eval_map()`.
-        dataset (list[str] | str | None): Dataset name or dataset classes.
-        scale_ranges (list[tuple] | None): Range of scales to be evaluated.
-        logger (logging.Logger | str | None): The way to print the mAP
-            summary. See `mmdet.utils.print_log()` for details. Default: None.
-    """
+# def print_map_summary(mean_ap, results, dataset=None, scale_ranges=None, logger=None):
+#     """Print mAP and results of each class.
+#     A table will be printed to show the gts/dets/recall/AP of each class and
+#     the mAP.
+#     Args:
+#         mean_ap (float): Calculated from `eval_map()`.
+#         results (list[dict]): Calculated from `eval_map()`.
+#         dataset (list[str] | str | None): Dataset name or dataset classes.
+#         scale_ranges (list[tuple] | None): Range of scales to be evaluated.
+#         logger (logging.Logger | str | None): The way to print the mAP
+#             summary. See `mmdet.utils.print_log()` for details. Default: None.
+#     """
 
+#     if logger == "silent":
+#         return
+
+#     if isinstance(results[0]["ap"], np.ndarray):
+#         num_scales = len(results[0]["ap"])
+#     else:
+#         num_scales = 1
+
+#     if scale_ranges is not None:
+#         assert len(scale_ranges) == num_scales
+
+#     num_classes = len(results)
+
+#     recalls = np.zeros((num_scales, num_classes), dtype=np.float32)
+#     aps = np.zeros((num_scales, num_classes), dtype=np.float32)
+#     num_gts = np.zeros((num_scales, num_classes), dtype=int)
+#     for i, cls_result in enumerate(results):
+#         if cls_result["recall"].size > 0:
+#             recalls[:, i] = np.array(cls_result["recall"], ndmin=2)[:, -1]
+#         aps[:, i] = cls_result["ap"]
+#         num_gts[:, i] = cls_result["num_gts"]
+
+#     if dataset is None:
+#         label_names = [str(i) for i in range(num_classes)]
+#     else:
+#         label_names = dataset
+
+#     if not isinstance(mean_ap, list):
+#         mean_ap = [mean_ap]
+
+#     header = ["class", "gts", "dets", "recall", "ap"]
+#     for i in range(num_scales):
+#         if scale_ranges is not None:
+#             print_log(f"Scale range {scale_ranges[i]}", logger=logger)
+#         table_data = [header]
+#         for j in range(num_classes):
+#             row_data = [
+#                 label_names[j],
+#                 num_gts[i, j],
+#                 results[j]["num_dets"],
+#                 f"{recalls[i, j]:.3f}",
+#                 f"{aps[i, j]:.3f}",
+#             ]
+#             table_data.append(row_data)
+#         table_data.append(["mAP", "", "", "", f"{mean_ap[i]:.3f}"])
+#         table = AsciiTable(table_data)
+#         table.inner_footing_row_border = True
+#         print_log("\n" + table.table, logger=logger)
+
+def print_map_summary(mean_ap, results, dataset=None, scale_ranges=None, logger=None):
+    """
+    Print mAP and per-class results without relying on mmcv.print_log.
+    """
+    # If someone explicitly silences logging, do nothing
     if logger == "silent":
         return
 
-    if isinstance(results[0]["ap"], np.ndarray):
+    # Determine how many scales we're reporting
+    if isinstance(results[0]["ap"], (list, tuple)) or hasattr(results[0]["ap"], "ndim") and results[0]["ap"].ndim > 0:
         num_scales = len(results[0]["ap"])
     else:
         num_scales = 1
 
     if scale_ranges is not None:
-        assert len(scale_ranges) == num_scales
+        assert len(scale_ranges) == num_scales, "scale_ranges length must match number of scales"
 
     num_classes = len(results)
 
+    # Accumulate recalls, APs, and GT counts per scale/class
     recalls = np.zeros((num_scales, num_classes), dtype=np.float32)
-    aps = np.zeros((num_scales, num_classes), dtype=np.float32)
+    aps     = np.zeros((num_scales, num_classes), dtype=np.float32)
     num_gts = np.zeros((num_scales, num_classes), dtype=int)
-    for i, cls_result in enumerate(results):
-        if cls_result["recall"].size > 0:
-            recalls[:, i] = np.array(cls_result["recall"], ndmin=2)[:, -1]
-        aps[:, i] = cls_result["ap"]
-        num_gts[:, i] = cls_result["num_gts"]
 
+    for i, cls_res in enumerate(results):
+        rec = np.array(cls_res["recall"], ndmin=2) if cls_res["recall"].size > 0 else np.zeros((num_scales, 0))
+        recalls[:, i] = rec[:, -1] if rec.shape[1] > 0 else 0
+        aps[:, i]     = cls_res["ap"]
+        num_gts[:, i] = cls_res["num_gts"]
+
+    # Determine class labels
     if dataset is None:
         label_names = [str(i) for i in range(num_classes)]
     else:
-        label_names = dataset
+        label_names = list(dataset)
 
-    if not isinstance(mean_ap, list):
-        mean_ap = [mean_ap]
+    # Ensure mean_ap is a list for uniform handling
+    mean_list = mean_ap if isinstance(mean_ap, (list, tuple)) else [mean_ap]
 
     header = ["class", "gts", "dets", "recall", "ap"]
-    for i in range(num_scales):
+    for s in range(num_scales):
         if scale_ranges is not None:
-            print_log(f"Scale range {scale_ranges[i]}", logger=logger)
+            print(f"Scale range {scale_ranges[s]}")
         table_data = [header]
-        for j in range(num_classes):
-            row_data = [
-                label_names[j],
-                num_gts[i, j],
-                results[j]["num_dets"],
-                f"{recalls[i, j]:.3f}",
-                f"{aps[i, j]:.3f}",
-            ]
-            table_data.append(row_data)
-        table_data.append(["mAP", "", "", "", f"{mean_ap[i]:.3f}"])
+        for c in range(num_classes):
+            table_data.append([
+                label_names[c],
+                num_gts[s, c],
+                results[c]["num_dets"],
+                f"{recalls[s, c]:.3f}",
+                f"{aps[s, c]:.3f}"
+            ])
+        table_data.append(["mAP", "", "", "", f"{mean_list[s]:.3f}"])
+
         table = AsciiTable(table_data)
         table.inner_footing_row_border = True
-        print_log("\n" + table.table, logger=logger)
+        print("\n" + table.table)
+
