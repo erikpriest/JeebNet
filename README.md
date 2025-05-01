@@ -10,6 +10,13 @@
 
 JeebNet (Jasdeep-Ellika-Erik-Bidwat Network) is a research project exploring how to defend multi-agent autonomous driving perception systems against adversarial attacks. In collaborative vehicular perception, connected vehicles and roadside units (V2X) share sensor data (LiDAR, camera feeds, etc.) to expand each individual’s situational awareness. This improves detection of hidden obstacles and extends perception beyond line-of-sight. However, **relying on external sensor inputs makes the system vulnerable** – malicious agents could transmit corrupted or false data to mislead an autonomous vehicle. JeebNet tackles this problem by introducing an **uncertainty-aware threat detection pipeline** that identifies and filters out adversarial inputs, making collaborative perception more robust.
 
+## Our Controntribution File Locations
+Here is the folder where most of the code resides [link](./ROBOSAC/coperception/tools/det/)!
+
+In particular I want to note the following files, train_discrminator.py, train_val_discriminator.ipynb, find_scenes.py, robosac.py (modified for our uses).
+
+Other important files from the work we did previously include three-module-pipeline in the projects root. 
+
 ## Background and Motivation
 
 Individual autonomous vehicles have inherent perception limitations. Onboard sensors have restricted range, blind spots, and performance degradation in poor weather or lighting. Collaborative perception addresses this by enabling vehicles, infrastructure, and pedestrians (V2X) to share sensor information for a richer, more holistic view of the environment. This V2X data exchange lets vehicles “see” around corners or through obstacles and improves safety in complex scenarios. Figure 1 illustrates a multi-vehicle intersection where some cars share data (V2X) and others do not, highlighting the advantage of communication.
