@@ -1,6 +1,7 @@
 # *JeebNet*: Adversarial Defense in Collaborative Vehicular Perception
 
 **"Simple yet effective sampling mechanism against malicious attackers in multi-agent collaborative perception settings"**
+<p align="center"><img src='figs/Architectureoverviewmidterm.png' align="center" height="350px"> </p>
 
 <p align="center"><img src='figs/Architecture.png' align="center" height="350px"> </p>
    
@@ -16,7 +17,7 @@ Individual autonomous vehicles have inherent perception limitations. Onboard sen
 Unfortunately, attacks on collaborative perception can be devastating. A malicious vehicle might send adversarially perturbed sensor data or completely fabricated detections to a victim vehicle. This could cause false positives (ghost objects) or mask real obstacles, leading to unsafe decisions. Prior defenses in this domain have drawbacks: some require knowing the attack type in advance or add significant latency. For example, Li et al. (2023) propose a RANSAC-inspired consensus defense (“Among Us”) where vehicles sample random subsets of teammates and only trust the data if enough peers agree​. This method is general to unknown attacks but can be time-consuming due to repeated sampling. Another approach by Su et al. (2023) estimates uncertainty for each collaborative detection​; unreliable inputs (high uncertainty) can then be down-weighted or discarded. Huang et al. (2025) combine adversarial training with uncertainty quantification to make predicted confidence scores more reliable under attack​. These works inspire our solution. JeebNet combines the strengths of learning-based detection and consensus-based validation: it uses a neural network to spot abnormal sensor features (uncertainty awareness and learned discrimination) and a consensus module to ensure robust agreement among agents.
 
 ## Dataset Description
-
+For the initial methodology we attempted to use the OPV2V dataset raw images and performed pre-processing on them. Location of one sample dataset: https://drive.google.com/drive/folders/1GRzoCNj69yPzJoLylAR-U1PnKeYOPXuh?usp=sharing
 Our experiments use the parsed detection dataset of V2X-Sim 2.0​, a public multi-agent autonomous driving dataset simulated in CARLA with SUMO traffic flow. V2X-Sim provides LiDAR point clouds and camera data for multiple vehicles in the same scene, along with 3D bounding box annotations for objects. In our project we focus on 3D object detection in bird’s-eye-view (BEV). The raw point clouds are preprocessed into sparse BEV tensors. During training, one “ego” vehicle combines its own BEV data with that of collaborators to detect cars in the scene. We utilize a subset of ≈2000 frames from V2X-Sim 2.0, split into a training set (~1700 frames across various scenes) and a validation set (~300 frames). Each frame includes up to 6 agents (5 collaborators + 1 ego). Please download and unzip the [parsed detection dataset](https://drive.google.com/file/d/17ADXn0-M2R7Rlg2BvopE_EhXELiBvbwl/view?usp=sharing) of V2X-Sim 2.0.
 
 
@@ -47,12 +48,18 @@ train or test
 ## Environment Setup
 
 ### Requirements
+For initial methodology:
+* Google Collab
+* Google drive access
 
+For final methodology:
 * Linux (tested on Ubuntu 18.04)
 * Python 3.7
 * Anaconda
 * PyTorch
 * CUDA 11.7
+
+
 
 ### Create Anaconda Environment from yml
 
@@ -88,6 +95,7 @@ Please download [pre-trained weights](https://drive.google.com/drive/folders/1dG
 
 
 ## Training the model
+For the initial methodology we only need to run .ipnb in google collab and the model trains following data loading.
 
 To train the adversarial-defense discriminator, you will need the V2X-Sim dataset path and a pre-trained detection model checkpoint. We assume you have preprocessed data folders for train and test (validation). Update the --train_data and --test_data arguments accordingly
 
