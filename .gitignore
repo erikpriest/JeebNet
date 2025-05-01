@@ -1,5 +1,7 @@
-coperception/ckpt/*
-# coperception/tools/det/discriminator_checkpoint.pth
+coperception/ckpt/
+V2X-Sim-det/
+V2X-Sim-det-long/
+coperception/tools/det/discriminator_checkpoint.pth
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

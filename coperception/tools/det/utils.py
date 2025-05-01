@@ -13,6 +13,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torchvision.models as models
+from torchvision.models import ResNet50_Weights, ResNet18_Weights
 from torch.utils.data import DataLoader
 
 from coperception.models.det import *
@@ -38,14 +39,14 @@ from coperception.utils.loss import *
 #         return x
 
 class Discriminator(nn.Module):
-    def __init__(self, base='resnet50', pretrained=True):
+    def __init__(self, base='resnet50'):
         super(Discriminator, self).__init__()
         
         # Load pre-trained model
         if base == 'resnet18':
-            self.backbone = models.resnet18(pretrained=pretrained)
+            self.backbone = models.resnet18(weights=ResNet18_Weights.DEFAULT)
         elif base == 'resnet50':
-            self.backbone = models.resnet50(pretrained=pretrained)
+            self.backbone = models.resnet50(weights=ResNet50_Weights.DEFAULT)
         else:
             raise ValueError(f"Unknown base model {base}")
         
@@ -71,18 +72,9 @@ def setup_config(args):
     config_global = ConfigGlobal("train", binary=True, only_det=True)
     config.inference = args.inference
 
-    if args.bound == "upperbound":
-        flag = "upperbound"
-    elif args.com == "when2com":
-        flag = "who2com" if args.inference == "argmax_test" else "when2com"
-        if args.warp_flag:
-            flag += "_warp"
-    elif args.com in {"v2v", "disco", "sum", "mean", "max", "cat", "agent"}:
+
+    if args.com in {"v2v", "disco", "sum", "mean", "max", "cat", "agent"}:
         flag = args.com
-    else:
-        flag = "lowerbound"
-        if args.box_com:
-            flag += "_box_com"
 
     config.flag = flag
     config.split = "test"
