@@ -13,7 +13,7 @@ JeebNet (Jasdeep-Ellika-Erik-Bidwat Network) is a research project exploring how
 ## Our Controntribution File Locations
 Here is the folder where most of the code resides [link](./ROBOSAC/coperception/tools/det/)!
 
-In particular I want to note the following files, train_discrminator.py, train_val_discriminator.ipynb, find_scenes.py, robosac.py (modified for our uses).
+In particular we want to note the following files, train_discrminator.py, train_val_discriminator.ipynb, find_scenes.py, robosac.py (modified for our uses).
 
 Other important files from the work we did previously include three-module-pipeline in the projects root. 
 
