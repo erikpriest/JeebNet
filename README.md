@@ -17,7 +17,7 @@ Unfortunately, attacks on collaborative perception can be devastating. A malicio
 
 ## Dataset Description
 
-Our experiments use the parsed detection dataset of V2X-Sim 2.0​, a public multi-agent autonomous driving dataset simulated in CARLA with SUMO traffic flow. V2X-Sim provides LiDAR point clouds and camera data for multiple vehicles in the same scene, along with 3D bounding box annotations for objects. In our project we focus on 3D object detection in bird’s-eye-view (BEV). The raw point clouds are preprocessed into sparse BEV tensors (each a 256×256 grid). During training, one “ego” vehicle combines its own BEV data with that of collaborators to detect cars in the scene. We utilize a subset of ≈2000 frames from V2X-Sim 2.0, split into a training set (~1700 frames across various scenes) and a validation set (~300 frames). Each frame includes up to 6 agents (5 collaborators + 1 ego). Please download and unzip the [parsed detection dataset](https://drive.google.com/file/d/1ZM_JkugZHmTwkR1gwG8ZuFq0YBwPDcDV/view?usp=drive_link) of V2X-Sim 2.0.
+Our experiments use the parsed detection dataset of V2X-Sim 2.0​, a public multi-agent autonomous driving dataset simulated in CARLA with SUMO traffic flow. V2X-Sim provides LiDAR point clouds and camera data for multiple vehicles in the same scene, along with 3D bounding box annotations for objects. In our project we focus on 3D object detection in bird’s-eye-view (BEV). The raw point clouds are preprocessed into sparse BEV tensors (each a 256×256 grid). During training, one “ego” vehicle combines its own BEV data with that of collaborators to detect cars in the scene. We utilize a subset of ≈2000 frames from V2X-Sim 2.0, split into a training set (~1700 frames across various scenes) and a validation set (~300 frames). Each frame includes up to 6 agents (5 collaborators + 1 ego). Please download and unzip the [parsed detection dataset](https://drive.google.com/file/d/17ADXn0-M2R7Rlg2BvopE_EhXELiBvbwl/view?usp=sharing) of V2X-Sim 2.0.
 
 
 ### Specifying Dataset
@@ -40,8 +40,8 @@ train or test
 ├──agent_4
 ├──agent_5
       ├──19_0
-	  ├──0.npy		
-	  ...
+	    ├──0.npy		
+	    ...
 ```
 
 ## Environment Setup
