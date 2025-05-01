@@ -217,8 +217,7 @@ def main(args):
 
             det_results_local, annotations_local = local_eval(num_agent, padded_voxel_points, reg_target, anchors_map, gt_max_iou, result, config, det_results_local, annotations_local)
 
-        if (cnt == 3):
-            break
+
     avg_val_loss = val_loss / (cnt+1)
     accuracy     = val_correct / val_total if val_total > 0 else 0.0
     print(f"Test loss = {avg_val_loss:.4f}, val acc = {accuracy*100:.2f}%")
