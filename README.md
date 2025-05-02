@@ -13,7 +13,7 @@ JeebNet (Jasdeep-Ellika-Erik-Bidwat Network) is a research project exploring how
 ## Our Controntribution File Locations
 Here is the folder where most of the code resides [link](./ROBOSAC/coperception/tools/det/)!
 
-In particular we want to note the following files for our latest implementation, train_discrminator.py, train_val_discriminator.ipynb, find_scenes.py, robosac.py (modified for our uses).
+In particular we want to note the following files for our latest implementation, train_discrminator.py (file for how we trained our discriminator), find_scenes.py (used to identify which scenes had only 6 agents for our training), robosac.py (original robosac file), run_inference.py (run the robosac system with the discriminator), utils.py. 
 
 Additional files from our first methodology can be found in the three-module-pipeline folder in the projects root. These include CVProject.ipynb which was our first attempt at buliding the system, CV-Project-General-Config.ipynb is the same as CVProject.ipynb but allows you to run it locally by setting config file locations, and encoder-variations contains various attempts at different encoders. 
 
